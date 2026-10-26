@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#075e54">
+<title>Real-Time Chat</title>
+<style>
+:root{--green:#075e54;--light:#e9f5f2;--bg:#f4f7f6;--text:#172321;--muted:#687774}
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:var(--text)}
+header{background:var(--green);color:#fff;padding:18px 16px;font-size:22px;font-weight:700}
+.wrap{max-width:620px;margin:auto;min-height:100vh;background:#fff}
+main{padding:16px}.card{border:1px solid #dce6e3;border-radius:14px;padding:16px;margin:12px 0;background:#fff}
+h2{font-size:18px;margin:0 0 12px}p{line-height:1.5;color:var(--muted)}
+input,button{width:100%;padding:13px;margin:7px 0;border-radius:10px;font-size:16px}
+input{border:1px solid #ccd9d5}button{border:0;background:var(--green);color:#fff;font-weight:700}
+button.secondary{background:#e5efec;color:var(--green)}.hidden{display:none!important}
+.note{font-size:13px;background:#fff8df;padding:12px;border-radius:10px;color:#6d5a1d}
+#chatList{padding:0;list-style:none}#chatList li{padding:13px;border-bottom:1px solid #edf1f0;cursor:pointer}
+#messages{height:42vh;overflow:auto;background:#f7faf9;padding:12px;border-radius:12px}
+.bubble{padding:10px 12px;margin:7px 0;border-radius:12px;max-width:85%;background:#e5efec;overflow-wrap:anywhere}
+.bubble.mine{margin-left:auto;background:#d5f5dc}.small{font-size:12px;color:#73807d}
+.row{display:flex;gap:8px;align-items:center}.row input{flex:1}.row button{width:95px}
+</style>
+</head>
+<body><div class="wrap">
+<header>💬 Real-Time Chat</header>
+<main>
+<div class="note">Starter app: live messaging works only after Firebase is configured and the app is connected to the internet.</div>
+<section id="setup" class="card">
+<h2>Welcome</h2><p>Sign in with your mobile number to create or open your account.</p>
+<label for="phone">Mobile number (with country code)</label>
+<input id="phone" type="tel" placeholder="+91 9876543210" autocomplete="tel">
+<div id="recaptcha-container"></div>
+<button id="sendOtp">Send OTP</button>
+<div id="otpArea" class="hidden">
+<input id="otp" inputmode="numeric" placeholder="Enter OTP">
+<button id="verifyOtp">Verify OTP & Continue</button>
+</div>
+<p id="authStatus" role="status"></p>
+</section>
+<section id="profile" class="card hidden">
+<h2>Set up your profile</h2>
+<input id="displayName" maxlength="40" placeholder="Your name">
+<button id="saveProfile">Save profile</button>
+</section>
+<section id="home" class="hidden">
+<div class="card"><h2>Your account</h2><p id="myAccount"></p><button class="secondary" id="logout">Log out</button></div>
+<div class="card"><h2>Find a friend</h2><input id="friendPhone" placeholder="Friend's mobile number (+91...)"><button id="openFriend">Find / start chat</button><p id="friendStatus"></p></div>
+<div class="card"><h2>Recent chats</h2><ul id="chatList"></ul></div>
+</section>
+<section id="chat" class="card hidden">
+<button class="secondary" id="backHome">← Back to chats</button>
+<h2 id="chatTitle">Chat</h2><div id="messages" aria-live="polite"></div>
+<div class="row"><input id="messageText" maxlength="2000" placeholder="Type a message..."><button id="sendMessage">Send</button></div>
+<p class="small">Messages are stored in Firestore when configured correctly.</p>
+</section>
+</main></div>
+<script type="module">
+/*
+  Firebase config is set for the user's Real-Time Chat project.
+  Enable Authentication > Phone, Firestore Database, and authorized domains in Firebase Console.
+*/
+const firebaseConfig = {
+  apiKey: "AIzaSyB5g1FWTQFH3l1HWmTLPItKX28HSJq2FBs",
+  authDomain: "real-time-chat-222e0.firebaseapp.com",
+  projectId: "real-time-chat-222e0",
+  storageBucket: "real-time-chat-222e0.firebasestorage.app",
+  messagingSenderId: "224374211597",
+  appId: "1:224374211597:web:96697f750fae1721d28144",
+  measurementId: "G-7JEP0K2L7S"
+};
+const configured = !Object.values(firebaseConfig).some(v => String(v).includes("PASTE_YOUR"));
+const $ = id => document.getElementById(id);
+let auth, db, currentUser, confirmation, unsubscribeMessages, unsubscribeChats, activeChatId, activeFriend;
+const show = (id, yes=true) => $(id).classList.toggle("hidden", !yes);
+function status(s){ $("authStatus").textContent=s; }
+function normalizePhone(s){return s.replace(/[^\d+]/g,"");}
+if(!configured){
+ status("Setup needed: add Firebase project configuration before sign-in and messaging can work.");
+ $("sendOtp").disabled=true; $("sendOtp").textContent="Firebase setup required";
+ $("openFriend").disabled=true; $("sendMessage").disabled=true;
+} else {
+ try {
+  const {initializeApp}=await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
+  const {getAuth,RecaptchaVerifier,signInWithPhoneNumber,onAuthStateChanged,signOut,updateProfile}=await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js");
+  const {getFirestore,doc,setDoc,getDoc,collection,query,where,onSnapshot,addDoc,serverTimestamp,orderBy}=await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
+  const app=initializeApp(firebaseConfig); auth=getAuth(app); db=getFirestore(app);
+  $("sendOtp").onclick=async()=>{
+   try{
+    if(!window.recaptchaVerifier) window.recaptchaVerifier=new RecaptchaVerifier(auth,"recaptcha-container",{size:"normal"});
+    confirmation=await signInWithPhoneNumber(auth,normalizePhone($("phone").value),window.recaptchaVerifier);
+    show("otpArea");status("OTP sent. Check your SMS.");
+   }catch(e){status(e.message||"Could not send OTP.");}
+  };
+  $("verifyOtp").onclick=async()=>{try{await confirmation.confirm($("otp").value.trim());status("Verified.");}catch(e){status("OTP verification failed. Check the code and try again.");}};
+  onAuthStateChanged(auth,async user=>{
+   currentUser=user;
+   show("setup",!user);show("home",!!user);
+   if(!user){show("profile",false);show("chat",false);if(unsubscribeChats)unsubscribeChats();return;}
+   const ref=doc(db,"users",user.uid), snap=await getDoc(ref);
+   if(!snap.exists()||!snap.data().displayName){show("profile");show("home",false);show("chat",false);}
+   else {show("profile",false);$("myAccount").textContent=(snap.data().displayName||"User")+" · "+(user.phoneNumber||"");loadChats();}
+  });
+  $("saveProfile").onclick=async()=>{
+   const displayName=$("displayName").value.trim();if(!displayName){alert("Enter your name first.");return;}
+   await setDoc(doc(db,"users",currentUser.uid),{uid:currentUser.uid,phoneNumber:currentUser.phoneNumber,displayName,createdAt:serverTimestamp()},{merge:true});
+   await updateProfile(currentUser,{displayName});show("profile",false);show("home");$("myAccount").textContent=displayName+" · "+(currentUser.phoneNumber||"");loadChats();
+  };
+  $("logout").onclick=()=>signOut(auth);
+  function chatId(a,b){return [a,b].sort().join("_");}
+  $("openFriend").onclick=async()=>{
+   const phone=normalizePhone($("friendPhone").value);if(!phone){$("friendStatus").textContent="Enter your friend's full mobile number.";return;}
+   if(phone===currentUser.phoneNumber){$("friendStatus").textContent="You cannot start a chat with yourself.";return;}
+   const q=query(collection(db,"users"),where("phoneNumber","==",phone));
+   // Phone-number lookup requires suitable Firestore rules/indexes; use a secure server-side lookup for production.
+   const {getDocs}=await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
+   const found=await getDocs(q);
+   if(found.empty){$("friendStatus").textContent="No account found for this number yet.";return;}
+   const f=found.docs[0].data();activeFriend=f;activeChatId=chatId(currentUser.uid,f.uid);
+   await setDoc(doc(db,"chats",activeChatId),{members:[currentUser.uid,f.uid],memberPhones:[currentUser.phoneNumber,f.phoneNumber],updatedAt:serverTimestamp()},{merge:true});
+   $("chatTitle").textContent=f.displayName||f.phoneNumber;show("chat");listenMessages();$("friendStatus").textContent="";
+  };
+  function loadChats(){
+   if(unsubscribeChats)unsubscribeChats();
+   const q=query(collection(db,"chats"),where("members","array-contains",currentUser.uid));
+   unsubscribeChats=onSnapshot(q,async snap=>{
+    const list=$("chatList");list.innerHTML="";
+    for(const d of snap.docs){
+     const data=d.data(), other=(data.members||[]).find(x=>x!==currentUser.uid);if(!other)continue;
+     const us=await getDoc(doc(db,"users",other));const u=us.exists()?us.data():{displayName:"Friend"};
+     const li=document.createElement("li");li.textContent=(u.displayName||u.phoneNumber||"Friend")+"  ›";
+     li.onclick=()=>{activeFriend=u;activeChatId=d.id;$("chatTitle").textContent=u.displayName||u.phoneNumber;show("chat");listenMessages();};
+     list.appendChild(li);
+    }
+    if(!list.children.length){const li=document.createElement("li");li.textContent="No chats yet — find a friend above.";list.appendChild(li);}
+   });
+  }
+  function listenMessages(){
+   if(unsubscribeMessages)unsubscribeMessages();
+   const q=query(collection(db,"chats",activeChatId,"messages"),orderBy("createdAt","asc"));
+   unsubscribeMessages=onSnapshot(q,snap=>{
+    const box=$("messages");box.innerHTML="";
+    snap.forEach(d=>{const m=d.data(),el=document.createElement("div");el.className="bubble"+(m.senderId===currentUser.uid?" mine":"");const body=document.createElement("div");body.textContent=m.text||"";const time=document.createElement("div");time.className="small";time.textContent=m.createdAt?.toDate?m.createdAt.toDate().toLocaleString():"Sending…";el.append(body,time);box.appendChild(el);});
+    box.scrollTop=box.scrollHeight;
+   });
+  }
+  $("sendMessage").onclick=async()=>{
+   const text=$("messageText").value.trim();if(!text||!activeChatId)return;
+   $("messageText").value="";
+   await addDoc(collection(db,"chats",activeChatId,"messages"),{text,senderId:currentUser.uid,createdAt:serverTimestamp()});
+   await setDoc(doc(db,"chats",activeChatId),{updatedAt:serverTimestamp(),lastMessage:text},{merge:true});
+  };
+  $("messageText").addEventListener("keydown",e=>{if(e.key==="Enter")$("sendMessage").click();});
+  $("backHome").onclick=()=>{show("chat",false);if(unsubscribeMessages)unsubscribeMessages();};
+ }catch(e){status("Firebase could not start. Check your configuration and internet connection.");console.error(e);}
+}
+</script></body></html>
